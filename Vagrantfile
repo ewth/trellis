@@ -13,15 +13,19 @@ if File.exist?("#{ANSIBLE_PATH}/vagrant.local.yml")
 end
 
 ensure_plugins(vconfig.fetch('vagrant_plugins')) if vconfig.fetch('vagrant_install_plugins')
+if Vagrant::Util::Platform.wsl?
+  # Additional wsl plugins
+  ensure_plugins(vconfig.fetch('vagrant_plugins_wsl')) if vconfig.fetch('vagrant_plugins_wsl')
+end
 
 trellis_config = Trellis::Config.new(root_path: ANSIBLE_PATH)
 
-if Vagrant::Util::Platform.darwin?
+if Vagrant::Util::Platform.darwin? || Vagrant::Util::Platform.wsl?
   Vagrant.require_version '>= 2.1.0', '< 2.2.19'
 else
   Vagrant.require_version '>= 2.1.0'
 end
-  
+
 Vagrant.configure('2') do |config|
   config.vm.box = vconfig.fetch('vagrant_box')
   config.vm.box_version = vconfig.fetch('vagrant_box_version')
@@ -68,7 +72,12 @@ Vagrant.configure('2') do |config|
     fail_with_message "vagrant-hostmanager missing, please install the plugin with this command:\nvagrant plugin install vagrant-hostmanager\n\nOr install landrush for multisite subdomains:\nvagrant plugin install landrush"
   end
 
-  vagrant_mount_type = vconfig.fetch('vagrant_mount_type')
+  # Force mount type to virtualbox if using wsl
+  if Vagrant::Util::Platform.wsl?
+    vagrant_mount_type = 'virtualbox'
+  else
+    vagrant_mount_type = vconfig.fetch('vagrant_mount_type')
+  end
 
   extra_options = if vagrant_mount_type == 'smb'
     {
@@ -123,6 +132,16 @@ Vagrant.configure('2') do |config|
       ansible.pip_install_cmd = 'sudo apt-get install -y -qq python3-pip'
       ansible.provisioning_path = provisioning_path
       ansible.version = vconfig.fetch('vagrant_ansible_version')
+
+      if Vagrant::Util::Platform.wsl?
+        ansible.install_mode = "pip_args_only"
+        # Install python3-pip, force symbolic link so pip === pip3, and uninstall ansible and ansible-base
+        ansible.pip_install_cmd += " && sudo apt-get install -y python-is-python3 haveged"
+        ansible.pip_install_cmd += " && sudo ln -s -f /usr/bin/pip3 /usr/bin/pip"
+        ansible.pip_install_cmd += " && sudo pip3 uninstall -y ansible ansible-base"
+        # Force specific ansible version
+        ansible.pip_args = "ansible==" + ansible.version + " ansible-base==" + ansible.version
+      end
     end
 
     ansible.compatibility_mode = '2.0'
@@ -130,8 +149,23 @@ Vagrant.configure('2') do |config|
     ansible.galaxy_role_file = File.join(provisioning_path, 'galaxy.yml') unless vconfig.fetch('vagrant_skip_galaxy') || ENV['SKIP_GALAXY']
     ansible.galaxy_roles_path = File.join(provisioning_path, 'vendor/roles')
 
+    if Vagrant::Util::Platform.wsl? &&
+      !vconfig.fetch('vagrant_skip_galaxy') && !ENV['SKIP_GALAXY'] &&
+      File.exist?("vendor/roles") && File.directory?("vendor/roles")
+        # Ansible trips over itself on WSL2 if vendor/roles already exists
+        FileUtils.remove_dir('vendor/roles', true)
+    end
+
     if which('trellis')
-      ansible.galaxy_command = 'trellis galaxy install'
+      if Vagrant::Util::Platform.wsl?
+        # Install trellis-cli and delete Python cache prior to installing galaxy.
+        ansible.galaxy_command = 'curl -sL https://roots.io/trellis/cli/get | sudo bash'
+        # Messing around with pip can cause Python caching issues to emerge, so delete all .pyc files.
+        ansible.galaxy_command += ' && find /home/vagrant/trellis/ -name \*.pyc -delete'
+        ansible.galaxy_command += ' && trellis galaxy install'
+      else
+        ansible.galaxy_command = 'trellis galaxy install'
+      end
     end
 
     ansible.groups = {
