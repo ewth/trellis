@@ -13,6 +13,9 @@ vagrant_plugins:
   - name: vagrant-bindfs
   - name: vagrant-hostmanager
 
+vagrant_plugins_wsl:
+  - name: virtualbox_WSL2
+
 # Array of synced folders:
 # - local_path: .
 #   destination: /path/on/vm
